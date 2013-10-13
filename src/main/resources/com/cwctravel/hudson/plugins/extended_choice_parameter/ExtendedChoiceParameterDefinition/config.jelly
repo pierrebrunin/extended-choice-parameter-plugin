@@ -52,8 +52,8 @@
     	   </j:when>
     	   <j:otherwise>
                <option value="PT_TEXTBOX">Text Box</option>
-           </j:otherwise>
-    	</j:choose>
+           </j:otherwise>    
+    	</j:choose>       	   	  	   
         <j:choose>
            <j:when test="${instance.type eq 'PT_MULTI_LEVEL_SINGLE_SELECT'}">       
     	       <option value="PT_MULTI_LEVEL_SINGLE_SELECT" selected="selected">Multi-Level Single Select</option>
@@ -93,7 +93,39 @@
   <f:entry title="Quote Value" field="quoteValue">
     <f:checkbox checked="${instance.quoteValue}"/>
   </f:entry>
-  
+  <f:entry title="Command" field="command">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="SSH Hostname" field="sshHostname">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="SSH Username" field="sshUsername">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="SSH Password" field="sshPassword">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="SSH Public hey" field="sshPublicKey">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="DB URL" field="dbURL">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="DB Driver" field="dbDriver">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="DB Username" field="dbUsername">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="DB Password" field="dbPassword">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="DB Request" field="dbRequest">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="DB Request file" field="dbRequestFile">
+    <f:textbox />
+  </f:entry>
   <f:entry title="Number of Visible Items" field="visibleItemCount">
     <f:textbox value="${visibleItemCount}"/>
   </f:entry>
@@ -101,5 +133,5 @@
   <f:entry title="Delimiter" field="multiSelectDelimiter">
     <f:textbox value="${multiSelectDelimiter}"/>
   </f:entry>
-
+  
 </j:jelly>

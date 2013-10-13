@@ -11,25 +11,37 @@ import hudson.model.ParameterValue;
 import hudson.model.ParameterDefinition;
 import hudson.util.FormValidation;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.StringWriter;
+import java.net.Socket;
 import java.net.URL;
+import java.nio.charset.Charset;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.Iterator;
-import java.util.LinkedHashSet;
-import java.util.LinkedHashMap;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import javax.servlet.ServletException;
 
 import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.tools.ant.Project;
 import org.apache.tools.ant.taskdefs.Property;
@@ -38,9 +50,15 @@ import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
 
 import au.com.bytecode.opencsv.CSVReader;
+import ch.ethz.ssh2.ChannelCondition;
+import ch.ethz.ssh2.Connection;
+import ch.ethz.ssh2.Session;
+import ch.ethz.ssh2.StreamGobbler;
 
 public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 	private static final long serialVersionUID = -2946187268529865645L;
+
+	private final static Logger LOG = Logger.getLogger(ExtendedChoiceParameterDefinition.class.getName());
 
 	public static final String PARAMETER_TYPE_SINGLE_SELECT = "PT_SINGLE_SELECT";
 
@@ -120,6 +138,148 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 		{
 			return doCheckPropertyFile(defaultPropertyFile, defaultPropertyKey, type);
 		}
+
+		// FIXME SSH validation
+		// public FormValidation doChecksshHostname(
+		// @QueryParameter final String sshHostname) {
+		// System.out.println("ExtendedChoiceParameterDefinition.DescriptorImpl.doCheckSsHPassword()");
+		// return doInternalCheckCommand(null, sshHostname, null, null, null);
+		// }
+		//
+		// public FormValidation doCheckSSHPublicKey(@QueryParameter final
+		// String command,
+		// @QueryParameter final String sshHostname, @QueryParameter final
+		// String sshUsername,
+		// @QueryParameter final String sshPublicKey) {
+		// System.out.println("ExtendedChoiceParameterDefinition.DescriptorImpl.doCheckSsHPublicKey()");
+		// return doInternalCheckCommand(command, sshHostname, sshUsername,
+		// null, sshPublicKey);
+		// }
+
+		public FormValidation doCheckSshHostname(@QueryParameter final String sshHostname) {
+			if (StringUtils.isBlank(sshHostname)) {
+				return FormValidation.ok();
+			}
+			Socket socket = null;
+			boolean reachable = false;
+			try {
+				socket = new Socket(sshHostname, 22);
+				reachable = true;
+			} catch (Exception e) {
+				return FormValidation.error(e, e.getMessage());
+			} finally {
+				if (socket != null)
+					try {
+						socket.close();
+					} catch (IOException e) {
+						return FormValidation.error(e, e.getMessage());
+					}
+			}
+			if (!reachable) {
+				return FormValidation.error(String.format("Host %s not found", sshHostname));
+			}
+			return FormValidation.ok();
+		}
+
+		public FormValidation doCheckCommand(@QueryParameter final String command) {
+			return doInternalCheckCommand(command, null, null, null, null);
+		}
+
+		private FormValidation doInternalCheckCommand(final String command, final String sshHostname,
+				final String sshUsername, final String sshPassword, final String sshPublicKey) {
+			if (StringUtils.isBlank(command)) {
+				return FormValidation.ok();
+			}
+			try {
+				if (StringUtils.isBlank(sshHostname)) {
+					String[] envs = new String[System.getenv().size()];
+					int i = 0;
+					for (String key : System.getenv().keySet()) {
+						envs[i] = String.format("%s=%s", key, System.getenv().get(key));
+						i++;
+					}
+					Process process = Runtime.getRuntime().exec(command, envs);
+					if (process.waitFor() != 0) {
+						StringWriter writer = new StringWriter();
+						try {
+							IOUtils.copy(process.getErrorStream(), writer, Charset.defaultCharset().name());
+							return FormValidation.error(writer.toString());
+						} finally {
+							writer.close();
+						}
+					}
+				} else {
+					Connection connection = new Connection(sshHostname);
+					connection.connect();
+
+					boolean isAuthenticated;
+					if (!StringUtils.isBlank(sshPublicKey)) {
+						isAuthenticated = connection.authenticateWithPublicKey(sshUsername, sshPublicKey.toCharArray(),
+								null);
+					} else {
+						isAuthenticated = connection.authenticateWithPassword(sshUsername, sshPassword);
+					}
+
+					if (!isAuthenticated) {
+						return FormValidation.error("Authentification failed with " + sshHostname);
+					}
+
+					Session session = connection.openSession();
+					session.execCommand(command);
+					session.waitForCondition(ChannelCondition.EXIT_STATUS, 60000);
+					if (session.getExitStatus() != 0) {
+						return FormValidation.error(String.format("Commad: %s, failed on: %s", command, sshHostname));
+					}
+					session.close();
+					connection.close();
+				}
+			} catch (InterruptedException e) {
+				return FormValidation.error(e, e.getMessage());
+			} catch (IOException e) {
+				return FormValidation.error(e, e.getMessage());
+			}
+			return FormValidation.ok();
+		}
+
+		public FormValidation doCheckDbDriver(@QueryParameter final String dbURL, @QueryParameter final String dbDriver) {
+			if (StringUtils.isBlank(dbURL)) {
+				return FormValidation.ok();
+			}
+			if (StringUtils.isBlank(dbDriver)) {
+				return FormValidation.error("Driver must be set.");
+			}
+			try {
+				Class.forName(dbDriver);
+			} catch (Exception e) {
+				return FormValidation.error(e, e.getMessage());
+			}
+			return FormValidation.ok();
+		}
+
+		public FormValidation doCheckDbRequestFile(@QueryParameter final String dbDriver,
+				@QueryParameter final String dbRequest, @QueryParameter final String dbRequestFile) {
+			if (StringUtils.isBlank(dbDriver)) {
+				return FormValidation.ok();
+			}
+			if (StringUtils.isBlank(dbRequestFile) && StringUtils.isBlank(dbRequest)) {
+				return FormValidation.error("Request must be set.");
+			}
+			if (!StringUtils.isBlank(dbRequestFile)) {
+				URL url;
+				try {
+					url = new URL(dbRequestFile);
+					url.openConnection().getInputStream();
+				} catch (Exception e) {
+					return FormValidation.error(e, e.getMessage());
+				}
+				return FormValidation.ok();
+			} else {
+				if (!StringUtils.isBlank(dbRequest)) {
+					return FormValidation.error("Request and Request file don't be set in same time");
+				}
+			}
+			return FormValidation.ok();
+		}
 	}
 
 	private boolean quoteValue;
@@ -129,7 +289,7 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 	private String type;
 
 	private String value;
-		
+
 	private String propertyFile;
 
 	private String propertyKey;
@@ -139,13 +299,37 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 	private String defaultPropertyFile;
 
 	private String defaultPropertyKey;
-	
+
 	private String multiSelectDelimiter;
 
+	private String command;
+
+	private String sshUsername;
+
+	private String sshPassword;
+
+	private String sshHostname;
+
+	private String sshPublicKey;
+
+	private String dbDriver;
+
+	private String dbURL;
+
+	private String dbUsername;
+
+	private String dbPassword;
+
+	private String dbRequest;
+
+	private String dbRequestFile;
+
 	@DataBoundConstructor
-	public ExtendedChoiceParameterDefinition(String name, String type, String value, String propertyFile, String propertyKey, String defaultValue,
-			String defaultPropertyFile, String defaultPropertyKey, boolean quoteValue, int visibleItemCount, String description,
-			String multiSelectDelimiter) {
+	public ExtendedChoiceParameterDefinition(String name, String type, String value, String propertyFile,
+			String propertyKey, String defaultValue, String defaultPropertyFile, String defaultPropertyKey,
+			boolean quoteValue, String command, String sshUsername, String sshPassword, String sshHostname,
+			String sshPublicKey, int visibleItemCount, String description, String dbURL, String dbDriver,
+			String dbPassword, String dbUsername, String dbRequest, String dbRequestFile,String multiSelectDelimiter) {
 		super(name, description);
 		this.type = type;
 
@@ -157,24 +341,35 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 		this.value = value;
 		this.defaultValue = defaultValue;
 		this.quoteValue = quoteValue;
-		if(visibleItemCount == 0) {
+		this.command = command;
+		this.sshHostname = sshHostname;
+		this.sshPassword = sshPassword;
+		this.sshUsername = sshUsername;
+		this.sshPublicKey = sshPublicKey;
+		this.dbURL = dbURL;
+		this.dbDriver = dbDriver;
+		this.dbPassword = dbPassword;
+		this.dbUsername = dbUsername;
+		this.dbRequest = dbRequest;
+		this.dbRequestFile = dbRequestFile;
+		if (visibleItemCount == 0) {
 			visibleItemCount = 5;
 		}
 		this.visibleItemCount = visibleItemCount;
 		
 		if(multiSelectDelimiter.equals("")) {
 			multiSelectDelimiter = ",";
-		}
+	}
 		this.multiSelectDelimiter = multiSelectDelimiter;
 	}
 
 	private Map<String, Boolean> computeDefaultValueMap() {
 		Map<String, Boolean> defaultValueMap = null;
 		String effectiveDefaultValue = getEffectiveDefaultValue();
-		if(!StringUtils.isBlank(effectiveDefaultValue)) {
+		if (!StringUtils.isBlank(effectiveDefaultValue)) {
 			defaultValueMap = new HashMap<String, Boolean>();
 			String[] defaultValues = StringUtils.split(effectiveDefaultValue, ',');
-			for(String value: defaultValues) {
+			for (String value : defaultValues) {
 				defaultValueMap.put(StringUtils.trim(value), true);
 			}
 		}
@@ -184,25 +379,25 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 	@Override
 	public ParameterValue createValue(StaplerRequest request) {
 		String[] requestValues = request.getParameterValues(getName());
-		if(requestValues == null || requestValues.length == 0) {
+		if (requestValues == null || requestValues.length == 0) {
 			return getDefaultParameterValue();
 		}
-		if(PARAMETER_TYPE_TEXT_BOX.equals(type)) {
+		if (PARAMETER_TYPE_TEXT_BOX.equals(type)) {
 			return new ExtendedChoiceParameterValue(getName(), requestValues[0]);
 		}
 		else {
 			String valueStr = getEffectiveValue();
-			if(valueStr != null) {
+			if (valueStr != null) {
 				List<String> result = new ArrayList<String>();
 
 				String[] values = valueStr.split(",");
 				Set<String> valueSet = new HashSet<String>();
-				for(String value: values) {
+				for (String value : values) {
 					valueSet.add(value);
 				}
 
-				for(String requestValue: requestValues) {
-					if(valueSet.contains(requestValue)) {
+				for (String requestValue : requestValues) {
+					if (valueSet.contains(requestValue)) {
 						result.add(requestValue);
 					}
 				}
@@ -212,16 +407,16 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 		}
 		return null;
 	}
-	
+
 	@Override
-	public ParameterValue createValue(StaplerRequest request, JSONObject jO) {		
+	public ParameterValue createValue(StaplerRequest request, JSONObject jO) {
 		Object value = jO.get("value");
 		String strValue = "";
-		if(value instanceof String) {
-			strValue = (String)value;
+		if (value instanceof String) {
+			strValue = (String) value;
 		}
 		else if(value instanceof JSONArray) {
-			JSONArray jsonValues = (JSONArray)value;
+			JSONArray jsonValues = (JSONArray) value;
 			if (   type.equals(PARAMETER_TYPE_MULTI_LEVEL_SINGLE_SELECT)
 				  || type.equals(PARAMETER_TYPE_MULTI_LEVEL_MULTI_SELECT))
 			{
@@ -247,7 +442,7 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 			}
 		}
 
-		if(quoteValue) {
+		if (quoteValue) {
 			strValue = "\"" + strValue + "\"";
 		}
 		return new ExtendedChoiceParameterValue(getName(), strValue);
@@ -256,18 +451,18 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 	@Override
 	public ParameterValue getDefaultParameterValue() {
 		String defaultValue = getEffectiveDefaultValue();
-		if(!StringUtils.isBlank(defaultValue)) {
-			if(quoteValue) {
+		if (!StringUtils.isBlank(defaultValue)) {
+			if (quoteValue) {
 				defaultValue = "\"" + defaultValue + "\"";
 			}
 			return new ExtendedChoiceParameterValue(getName(), defaultValue);
 		}
 		return super.getDefaultParameterValue();
 	}
-	
+
 	// note that computeValue is not called by multiLevel.jelly
 	private String computeValue(String value, String propertyFilePath, String propertyKey) {
-		if(!StringUtils.isBlank(propertyFile) && !StringUtils.isBlank(propertyKey)) {
+		if (!StringUtils.isBlank(propertyFile) && !StringUtils.isBlank(propertyKey)) {
 			try {
 
 				Project project = new Project();
@@ -275,7 +470,7 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 				property.setProject(project);
 
 				File propertyFile = new File(propertyFilePath);
-				if(propertyFile.exists()) {
+				if (propertyFile.exists()) {
 					property.setFile(propertyFile);
 				}
 				else {
@@ -285,13 +480,146 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 				property.execute();
 
 				return project.getProperty(propertyKey);
-			}
-			catch(Exception e) {
+			} catch (Exception e) {
 
 			}
-		}
-		else if(!StringUtils.isBlank(value)) {
+		} else if (!StringUtils.isBlank(value)) {
 			return value;
+		} else if (!StringUtils.isBlank(command)) {
+			if (!StringUtils.isBlank(sshHostname)) {
+				return execSSHCommand();
+			} else {
+				return execCommand();
+			}
+		} else if (!StringUtils.isBlank(getDbURL())) {
+			try {
+				Class.forName(getDbDriver());
+				java.sql.Connection connection = DriverManager.getConnection(getDbURL(), getDbUsername(),
+						getDbPassword());
+				PreparedStatement preparedStatement = null;
+				if (StringUtils.isBlank(getDbRequestFile())) {
+					preparedStatement = connection.prepareStatement(getDbRequest());
+				} else {
+					URL url = new URL(getDbRequestFile());
+					InputStream inputStream = url.openStream();
+					StringWriter writer = new StringWriter();
+					IOUtils.copy(inputStream, writer, Charset.defaultCharset().name());
+					String request = writer.toString();
+					writer.close();
+					inputStream.close();
+					preparedStatement = connection.prepareStatement(request);
+				}
+				ResultSet resultSet = preparedStatement.executeQuery();
+				String result = null;
+				while (resultSet.next()) {
+					if (result == null) {
+						result = resultSet.getString(1);
+						continue;
+					}
+					result = resultSet.getString(1);
+				}
+				return result;
+			} catch (Exception e) {
+				LOG.log(Level.SEVERE, e.getMessage(), e);
+				return null;
+			}
+		}
+		return null;
+	}
+
+	private String execSSHCommand() {
+		Connection connection = new Connection(sshHostname);
+		Session session = null;
+		InputStream stdout = null;
+		BufferedReader bufferedReader = null;
+		try {
+			connection.connect();
+
+			boolean isAuthenticated;
+			if (!StringUtils.isBlank(sshPublicKey)) {
+				isAuthenticated = connection.authenticateWithPublicKey(sshUsername, sshPublicKey.toCharArray(), null);
+			} else {
+				isAuthenticated = connection.authenticateWithPassword(sshUsername, sshPassword);
+			}
+
+			if (!isAuthenticated) {
+				FormValidation.error("Authentification failed with " + sshHostname);
+				return null;
+			}
+
+			session = connection.openSession();
+			session.execCommand(command);
+			stdout = new StreamGobbler(session.getStdout());
+			bufferedReader = new BufferedReader(new InputStreamReader(stdout));
+
+			String result = null;
+			String line = null;
+			while ((line = bufferedReader.readLine()) != null) {
+				if (result == null) {
+					result = line;
+					continue;
+				}
+				result += "," + line;
+			}
+			session.waitForCondition(ChannelCondition.EXIT_STATUS, 60000);
+			if (session.getExitStatus() != 0) {
+				FormValidation.error(String.format("Commad: %s, failed on: %s", command, sshHostname));
+			}
+			return result;
+		} catch (IOException e) {
+			throw new RuntimeException(e);
+		} finally {
+			// FIXME potential Leak!
+			try {
+				if (stdout != null) {
+					stdout.close();
+				}
+				if (bufferedReader != null) {
+					bufferedReader.close();
+				}
+				if (session != null) {
+					session.close();
+				}
+				if (connection != null) {
+					connection.close();
+				}
+			} catch (IOException e) {
+				throw new RuntimeException(e);
+			}
+		}
+	}
+
+	private String execCommand() {
+		String[] envs = new String[System.getenv().size()];
+		int i = 0;
+		for (String key : System.getenv().keySet()) {
+			envs[i] = String.format("%s=%s", key, System.getenv().get(key));
+			i++;
+		}
+		try {
+			Process process = Runtime.getRuntime().exec(command, envs);
+			if (process.waitFor() != 0) {
+				StringWriter writer = new StringWriter();
+				IOUtils.copy(process.getErrorStream(), writer, Charset.defaultCharset().name());
+				FormValidation.error(writer.toString());
+				writer.close();
+			} else {
+				InputStreamReader inputStreamReader = new InputStreamReader(process.getInputStream());
+				BufferedReader bufferedReader = new BufferedReader(inputStreamReader);
+				String result = null;
+				String line;
+				while ((line = bufferedReader.readLine()) != null) {
+					if (result == null) {
+						result = line;
+					}
+					result += "," + line;
+				}
+				return result;
+			}
+		} catch (IOException e) {
+			throw new RuntimeException(e);
+		} catch (InterruptedException e) {
+			throw new RuntimeException(e);
 		}
 		return null;
 	}
@@ -485,7 +813,7 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 		
 		return collapsedMap;
 	}
-	
+
 	public String getValue() {
 		return value;
 	}
@@ -521,7 +849,7 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 	public void setVisibleItemCount(int visibleItemCount) {
 		this.visibleItemCount = visibleItemCount;
 	}
-	
+
 	public String getMultiSelectDelimiter() {
 		return this.multiSelectDelimiter;
 	}
@@ -536,5 +864,93 @@ public class ExtendedChoiceParameterDefinition extends ParameterDefinition {
 
 	public Map<String, Boolean> getDefaultValueMap() {
 		return computeDefaultValueMap();
+	}
+
+	public String getSshUsername() {
+		return sshUsername;
+	}
+
+	public void setSshUsername(String sshUsername) {
+		this.sshUsername = sshUsername;
+	}
+
+	public String getSshPassword() {
+		return sshPassword;
+	}
+
+	public void setSshPassword(String sshPassword) {
+		this.sshPassword = sshPassword;
+	}
+
+	public String getSshHostname() {
+		return sshHostname;
+	}
+
+	public void setSshHostname(String sshHostname) {
+		this.sshHostname = sshHostname;
+	}
+
+	public String getCommand() {
+		return command;
+	}
+
+	public void setCommand(String command) {
+		this.command = command;
+	}
+
+	public String getSshPrivateKey() {
+		return sshPublicKey;
+	}
+
+	public void setSshPrivateKey(String sshPrivateKey) {
+		this.sshPublicKey = sshPrivateKey;
+	}
+
+	public String getDbDriver() {
+		return dbDriver;
+	}
+
+	public void setDbDriver(String dbDriver) {
+		this.dbDriver = dbDriver;
+	}
+
+	public String getDbURL() {
+		return dbURL;
+	}
+
+	public void setDbURL(String dbURL) {
+		this.dbURL = dbURL;
+	}
+
+	public String getDbUsername() {
+		return dbUsername;
+	}
+
+	public void setDbUsername(String dbUsername) {
+		this.dbUsername = dbUsername;
+	}
+
+	public String getDbPassword() {
+		return dbPassword;
+	}
+
+	public void setDbPassword(String dbPassword) {
+		this.dbPassword = dbPassword;
+	}
+
+	public String getDbRequest() {
+		return dbRequest;
+	}
+
+	public void setDbRequest(String dbRequest) {
+		this.dbRequest = dbRequest;
+	}
+
+	public String getDbRequestFile() {
+		return dbRequestFile;
+	}
+
+	public void setDbRequestFile(String dbRequestFile) {
+		this.dbRequestFile = dbRequestFile;
 	}
 }
